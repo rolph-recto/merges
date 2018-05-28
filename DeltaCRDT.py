@@ -5,15 +5,21 @@
 from CRDT import *
 
 class DotStore(object):
+  def is_bottom(self):
+    raise Exception("is_bottom() must be implemented")
+
   def dots(self):
-    raise Exception("dots method not implemented!")
+    raise Exception("dots() must be implemented")
 
 class DotSet(DotStore):
   def __init__(self, s=None):
     self.set = set() if s is None else s
 
+  def is_bottom(self):
+    return len(self.set) == 0
+
   def dots(self):
-    return self.dotset
+    return self.set
 
   def copy(self):
     return DotSet(self.set.copy())
@@ -26,6 +32,9 @@ class DotSet(DotStore):
 class DotFun(DotStore):
   def __init__(self, m=None):
     self.map = {} if m is None else m
+
+  def is_bottom(self):
+    return len(self.map) == 0
 
   def dots(self):
     return set(self.map.keys())
@@ -45,7 +54,10 @@ class DotFun(DotStore):
 
 # map from arbitrary keys to dot stores
 class DotMap(DotStore):
-  def __init__(self, m=None):
+  def __init__(self, val_bottom, m=None):
+    # val_bottom is the bottom of the value lattice; this is used for joining
+    # when keys aren't mapped to anything
+    self.val_bottom = val_bottom
     self.map = {} if m is None else m
 
   def dots(self):
@@ -55,6 +67,12 @@ class DotMap(DotStore):
 
     return d
 
+  def is_bottom(self):
+    return len(self.map) == 0
+
+  def domain(self):
+    return set(self.map.keys())
+
   def __setitem__(self, dot, val):
     self.map[dot] = val
 
@@ -62,10 +80,14 @@ class DotMap(DotStore):
     return self.map[dot]
 
   def copy(self):
-    return DotMap(self.map.copy())
+    return DotMap(self.val_bottom.copy(), self.map.copy())
   
   def __str__(self):
-    return "DotMap: " + str(self.map)
+    strmap = ""
+    for k, v in self.map.iteritems():
+      strmap += str(k) + ": " + str(v) + ", "
+
+    return "DotMap: {" + strmap + "}"
 
     
 class CausalCRDT(CRDT):
@@ -75,20 +97,17 @@ class CausalCRDT(CRDT):
     self.causal_ctx = set()
 
   def copy(self):
-    clone = CausalCRDT(self.dot_store.copy())
+    clone = CausalCRDT("", None)
+    clone.dot_store = self.dot_store.copy()
     clone.causal_ctx = self.causal_ctx.copy()
     return clone
 
-  # is the CRDT's state the bottom of the lattice?
-  def bottom(self):
-    raise Exception("bottom() must be implemented")
-
   def join(self, ccrdt):
     if type(self.dot_store) is DotSet:
-      m = (ccrdt.dot_store & self.dot_store) \
-        | (self.dot_store - ccrdt.causal_ctx) \
-        | (ccrdt.dot_store - self.causal_ctx)
-      self.dot_store = DotStore(m)
+      m = (ccrdt.dot_store.set & self.dot_store.set) \
+        | (self.dot_store.set - ccrdt.causal_ctx) \
+        | (ccrdt.dot_store.set - self.causal_ctx)
+      self.dot_store = DotSet(m)
       self.causal_ctx |= ccrdt.causal_ctx
 
     elif type(self.dot_store) is DotFun:
@@ -113,26 +132,25 @@ class CausalCRDT(CRDT):
       self.causal_ctx |= ccrdt.causal_ctx
 
     elif type(self.dot_store) is DotMap:
-      union_keys = self.dot_store.dots() | ccrdt.dot_store.dots()
+      union_keys = self.dot_store.domain() | ccrdt.dot_store.domain()
       m = {}
       for key in union_keys:
-        if key in self.dot_store.map and key not in ccrdt.dot_store.map:
-          m[key] = self.dot_store.map[key]
+        ds1 = self.dot_store.map.get(key, self.dot_store.val_bottom).copy()
+        ds2 = ccrdt.dot_store.map.get(key, ccrdt.dot_store.val_bottom).copy()
+        v1 = CausalCRDT("", ds1)
+        v1.causal_ctx = self.causal_ctx.copy()
+        v2 = CausalCRDT("", ds2)
+        v2.causal_ctx = ccrdt.causal_ctx.copy()
+        v1.join(v2)
 
-        elif key not in self.dot_store.map and key in ccrdt.dot_store.map:
-          m[key] = ccrdt.dot_store.map[key]
+        if not v1.dot_store.is_bottom():
+          m[key] = v1.dot_store
 
-        else:
-          clone = self.copy()
-          clone.join(ccrdt)
-          if not clone.bottom():
-            m[key] = clone.dot_store.map[key]
-
-      self.dot_store = DotMap(m)
+      self.dot_store = DotMap(self.dot_store.val_bottom.copy(), m)
       self.causal_ctx |= ccrdt.causal_ctx
 
   def __str__(self):
-    return "CausalCRDT\n" + str(self.dot_store) + "\nCausal context: " + str(self.causal_ctx)
+    return "CausalCRDT\n" + str(self.dot_store) + "\nCausal context: " + str(self.causal_ctx) + "\n"
 
 
 class MVRegister(CausalCRDT):
@@ -164,20 +182,63 @@ class MVRegister(CausalCRDT):
     super(MVRegister, self).join(data["delta"])
 
 
+class AWSet(CausalCRDT):
+  def __init__(self, name):
+    super(AWSet, self).__init__(name, DotMap(DotSet()))
+
+  @CRDT.command
+  def add(self, e):
+    singdot = set([self.store.next_dot()])
+    delta = CausalCRDT("", DotMap(DotSet()))
+    delta.dot_store[e] = DotSet(singdot)
+    delta.causal_ctx = self.dot_store.map[e].set if e in self.dot_store.map else set()
+    delta.causal_ctx |= singdot
+    return CRDTCommand("AWSet", { "delta": delta })
+  
+  @CRDT.command
+  def remove(self, e):
+    delta = CausalCRDT("", DotMap(DotSet()))
+    delta.causal_ctx = self.dot_store.map[e].set if e in self.dot_store.map else set()
+    return CRDTCommand("AWSet", { "delta": delta })
+
+  @CRDT.command
+  def clear(self):
+    delta = CausalCRDT("", DotMap(DotSet()))
+    delta.causal_ctx = self.dot_store.dots()
+    return CRDTCommand("AWSet", { "delta": delta })
+
+  def elems(self):
+    return set(self.dot_store.map.keys())
+
+  def contains(self, e):
+    return e in self.elems()
+
+  # unlike op-based CRDTs, there is a single executor, which just joins
+  # the delta from the operation to the current state of the CRDT.
+  @CRDT.executor("AWSet")
+  def join(self, data):
+    super(AWSet, self).join(data["delta"])
+
+
 def test1():
   s1 = CRDTStore()
-  s1.register(MVRegister("reg"))
-  s1["reg"].write(10)
+  s1.register(AWSet("set"))
+  s1["set"].add("Hemingway")
 
   s2 = CRDTStore()
   s1.connect(s2)
-  s2.register(MVRegister("reg"))
-  s2["reg"].write(20)
-  s2["reg"].write(30)
+  s2.register(AWSet("set"))
+  s2["set"].add("Kafka")
 
   s1.sync()
 
-  print s1["reg"].read()
+  s1["set"].clear()
+  s2["set"].add("O'Connor")
+
+  s1.sync()
+
+  print s1["set"].elems(), s2["set"].elems()
+
 
 def main():
   test1()
