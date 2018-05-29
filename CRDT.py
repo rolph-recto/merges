@@ -82,6 +82,8 @@ class CRDT(object):
   def __init__(self, name):
     self.store = None
     self.name = name
+    # should this CRDT's operations be published to other replicas?
+    self.published = True
 
   # set CRDT to bottom; this only makes sense for some CRDTs
   # (e.g. OR sets but not Grow-Only sets)
@@ -92,7 +94,8 @@ class CRDT(object):
     self.store = store
 
   def publish(self, cmd):
-    self.store.publish(cmd)
+    if self.store is not None and self.published:
+      self.store.publish(cmd)
 
   def executeCommand(self, cmd):
     CRDT.executorMap[cmd.type](self, cmd.data)

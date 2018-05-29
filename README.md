@@ -6,6 +6,11 @@ Code for merges research. Current contents:
 
 Toy CRDT implementation. Models synchronization across several stores/replicas.
 
+*OpCRDT.py* contains implementations of op-based CRDTs
+
+*DeltaCRDT.py* contains implementations of delta state-based CRDTs, from
+"Delta State Replicated Data Types" by Almeida et al, 2016
+
 
 ### CRDT.hs
 
